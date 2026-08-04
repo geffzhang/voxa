@@ -81,9 +81,10 @@ internal sealed class EspeakPhonemizer
 
             return FormatPhonemes(stdout, text);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
+            if (ct.IsCancellationRequested) throw;
             throw new TimeoutException($"espeak-ng did not respond within {Timeout.TotalSeconds:F0}s.");
         }
     }

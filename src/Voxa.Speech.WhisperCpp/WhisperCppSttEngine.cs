@@ -169,19 +169,43 @@ public sealed class WhisperCppSttEngine : ISpeechToTextEngine
         lock (_gate)
         {
             if (_stopped) return ValueTask.CompletedTask;
-
-            AppendPcm16(pcm.Span);
-
-            // A 30 s monologue between VAD stops is rare but legal: transcribe the full window as
-            // its own final segment and keep buffering — never drop audio silently.
-            if (_buffered >= MaxBufferedSamples)
+            var remaining = pcm.Span;
+            while (!remaining.IsEmpty)
             {
-                _logger.LogWarning(
-                    "WhisperCpp STT: utterance exceeded the 30 s whisper context window; transcribing the buffered window and continuing");
-                QueueTranscriptionLocked();
+                ct.ThrowIfCancellationRequested();
+                var capacityBytes = (MaxBufferedSamples - _buffered) * 2;
+                var length = Math.Min(remaining.Length, capacityBytes);
+                AppendPcm16(remaining[..length]);
+                remaining = remaining[length..];
+                if (_buffered >= MaxBufferedSamples)
+                {
+                    _logger.LogWarning(
+                        "WhisperCpp STT: utterance exceeded the 30 s whisper context window; transcribing the buffered window and continuing");
+                    QueueTranscriptionLocked();
+                }
             }
         }
         return ValueTask.CompletedTask;
+    }
+
+    public Task WaitForPendingAsync(CancellationToken ct)
+    {
+        Task pending;
+        lock (_gate) pending = _transcriptions;
+        return pending.WaitAsync(ct);
+    }
+
+    public async Task CancelAsync()
+    {
+        _lifetime.Cancel();
+        Task pending;
+        lock (_gate)
+        {
+            _stopped = true;
+            pending = _transcriptions;
+        }
+        try { await pending.ConfigureAwait(false); } catch { }
+        _transcripts.Writer.TryComplete();
     }
 
     public Task FlushAsync()

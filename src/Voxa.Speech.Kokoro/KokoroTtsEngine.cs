@@ -115,7 +115,7 @@ public sealed class KokoroTtsEngine : ITextToSpeechEngine
         // archive, the espeak data dir sits at <bin>/../share/espeak-ng-data and espeak needs
         // --path pointed at its parent; system installs know their own data.
         string espeakPath;
-        string? espeakDataParent = null;
+        string? espeakDataParent = _options.EspeakDataPath;
         if (!string.IsNullOrEmpty(_options.EspeakPath))
         {
             espeakPath = _options.EspeakPath;

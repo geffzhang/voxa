@@ -326,6 +326,37 @@ app.MapVoxaVoice(<span class="str">"/voice"</span>).UseDefaults();</code></pre>
   to CPU). The base package bundles only the CPU runtime; a GPU runtime is a matching NuGet package the consuming
   app adds, and an unsatisfiable explicit request throws with a remediation message rather than silently degrading.</p>
 
+<h3>10.4 Embedded desktop host — <code>Voxa.ArkeSidecar</code></h3>
+<p><code>Voxa.ArkeSidecar</code> is a Windows executable for an embedding desktop product such as Arke Studio,
+  not a public network service or a replacement for the normal in-process provider composition. The desktop host
+  owns the child process, selects the matching <code>win-x64</code> or <code>win-arm64</code> self-contained build,
+  provisions all model and voice assets, passes their explicit paths, and communicates over a private loopback HTTP
+  contract:</p>
+<pre><code>desktop host -- starts/supervises --&gt; Voxa.ArkeSidecar.exe
+     |                                  |-- Kokoro ONNX (in sidecar)
+     |-- GET  /health                   |-- espeak-ng CLI (separate GPL process)
+     |-- GET  /voices                   `-- WhisperCpp (in sidecar)
+     |-- POST /tts
+     `-- POST /stt</code></pre>
+<p>The service accepts only literal loopback bind addresses (<code>127.0.0.1</code> or <code>::1</code>), clears
+  inherited ASP.NET/Kestrel configuration so it cannot acquire another listener, and rejects non-loopback clients.
+  It has no TLS or authentication because it is a same-machine component; it must not be deployed as a LAN or public
+  server. It accepts no cloud credentials, opens model resolution in offline mode, and removes application logging
+  providers so text, audio, and transcripts are not content-logged.</p>
+<p>Unlike the general-purpose cache in §10.2, the sidecar never downloads assets. The host must pass the Kokoro model
+  and config, the directory containing all six voice files, the Whisper model, and the espeak-ng executable and data
+  paths. Those files remain external to the self-contained publish directory. Kokoro phonemization starts espeak-ng
+  as a separate process; no GPL code is linked into a Voxa assembly.</p>
+<p><b>Protocol version 1:</b> <code>GET /health</code> returns <code>ok</code>, <code>version</code>,
+  <code>protocolVersion: 1</code>, <code>architecture</code>, <code>engines</code>, and an optional safe
+  <code>unavailableReason</code>. Missing assets do not prevent HTTP startup: <code>ok: true</code> reports service
+  liveness, while the optional reason reports Kokoro and/or Whisper degradation. The two engines fail independently;
+  their request endpoint returns <code>503</code> without cloud fallback. The host should keep the desktop app alive,
+  disable only unavailable speech features, and restart the sidecar after a sticky runtime failure is corrected.</p>
+<div class="callout warn"><b>Deployment status.</b> The project supports local self-contained publishes for
+  <code>win-x64</code> and <code>win-arm64</code>. The repository does not currently publish those directories as
+  release artifacts or smoke-test the packaged executables; contract tests run against the built application.</div>
+
 <h2 id="catalog"><span class="secno">11</span>Provider catalog</h2>
 <table>
   <tr><th>Capability</th><th>Cloud</th><th>Local / offline</th></tr>
@@ -414,6 +445,7 @@ app.MapVoxaVoice(<span class="str">"/voice"</span>).UseDefaults();</code></pre>
   <tr><td><code>Voxa.AspNetCore</code></td><td><code>AddVoxa</code>, the registry, <code>DefaultVoicePipelineComposer</code>, profiles, the validator.</td></tr>
   <tr><td><code>Voxa</code> (meta)</td><td>One reference: <code>AddVoxa(cfg)</code> with every built-in provider bundled.</td></tr>
   <tr><td><code>Voxa.Cli</code> · <code>Voxa.Mcp</code></td><td>A headless Core entry point; an MCP server that gives an agent a voice/ears.</td></tr>
+  <tr><td><code>Voxa.ArkeSidecar</code></td><td>Loopback-only, host-supervised Windows executable exposing protocol-v1 health, voice catalog, batch Kokoro TTS, and batch Whisper STT for an embedded desktop architecture.</td></tr>
 </table>
 
 <h2 id="testing"><span class="secno">14</span>Testing &amp; CI</h2>

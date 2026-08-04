@@ -23,6 +23,7 @@
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="Voxa.Speech.Kokoro.Tests" />
+    <InternalsVisibleTo Include="Voxa.ArkeSidecar.Tests" />
   </ItemGroup>
 
   <ItemGroup>

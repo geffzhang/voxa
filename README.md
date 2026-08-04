@@ -79,6 +79,32 @@ Set `"Tts": "Kokoro"` for markedly more natural speech (heavier on CPU), and swa
 real agent when you have keys. Details — model catalogs, latency expectations, air-gapped
 deployment, zero-cost CI — in [`docs/local-speech.md`](docs/local-speech.md).
 
+### Embed local speech in an Arke desktop host
+
+`Voxa.ArkeSidecar` is a small Windows HTTP service intended to be launched, supervised, and stopped
+by an embedding desktop application such as Arke Studio. It keeps Kokoro TTS and Whisper STT out of
+the desktop process while preserving an entirely local data path. It accepts only literal loopback
+bind addresses (`127.0.0.1` or `::1`), clears inherited ASP.NET/Kestrel listeners, and rejects
+non-loopback clients.
+
+The host supplies explicit paths for the Kokoro model and config, all six voice files, the Whisper
+model, and the espeak-ng executable and data. These assets are external and are not bundled or
+downloaded by the sidecar. No cloud credentials are accepted, no cloud speech service is used, and
+application logging is disabled so audio, text, and transcripts are not content-logged. espeak-ng
+runs as a separate process for phonemization, preserving the GPL process boundary.
+
+| Endpoint | Contract |
+|---|---|
+| `GET /health` | Protocol/version, process architecture, engine names, and an optional safe `unavailableReason`; protocol version is `1`. |
+| `GET /voices` | Static Kokoro voice catalog used by the host UI. |
+| `POST /tts` | `{ "voice", "text", "speed"? }` to a complete `audio/wav` response. |
+| `POST /stt` | Batch 16 kHz mono PCM16 audio to `{ "text": "..." }`. |
+
+Missing assets do not prevent the HTTP service from starting. Health still reports `ok: true` for
+the running service and identifies unavailable engines; `/tts` and `/stt` degrade independently and
+return `503` when their engine is unavailable. See the full launch, publishing, endpoint, privacy,
+and failure contract in [`docs/local-speech.md#arke-desktop-sidecar`](docs/local-speech.md#arke-desktop-sidecar).
+
 ### Smart turn detection — don't cut people off mid-thought
 
 A silence-only VAD ends the turn on a fixed pause, so `Voxa:Vad:StopDurationMs` has to stay conservative
