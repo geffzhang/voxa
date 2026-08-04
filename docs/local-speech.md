@@ -52,6 +52,163 @@ barge-in. First run downloads the models, so give it a moment before the first r
   same rate as the cloud TTS default, so swapping ElevenLabs→Kokoro doesn't change the wire
   session at all). Use `"Precision": "int8"` (~92 MB) on weak machines.
 
+## Arke desktop sidecar
+
+`Voxa.ArkeSidecar` is a Windows executable for embedding local speech in a desktop product such as
+Arke Studio. It is not a public speech server and it is separate from the in-process provider flow
+described above: the desktop host owns its lifetime, chooses a free loopback port, supplies every
+speech asset, waits for health, and degrades its speech UI if the child exits or an engine is
+unavailable.
+
+```text
+Arke desktop host
+  |-- starts/stops the architecture-matched Voxa.ArkeSidecar.exe
+  |-- supplies explicit asset paths and a loopback port
+  `-- HTTP on loopback only
+        |-- Kokoro ONNX synthesis in the sidecar process
+        |-- espeak-ng child process for phonemization
+        `-- WhisperCpp transcription in the sidecar process
+```
+
+### Network and privacy boundary
+
+- The listener defaults to `127.0.0.1:5901`. `--host` accepts only a literal loopback IP
+  (`127.0.0.1` or `::1`); hostnames, `0.0.0.0`, LAN addresses, and public addresses are rejected.
+- Inherited ASP.NET Core and Kestrel configuration is cleared, so environment settings cannot add a
+  second public listener. Requests whose remote address is not loopback receive `403`.
+- The API has no TLS or authentication and is intentionally reachable only from the local machine.
+  It is a same-machine desktop component, not a network deployment surface.
+- The sidecar has no cloud provider configuration and accepts no cloud credentials. Its model caches
+  are opened in offline mode, so requests do not trigger model downloads or cloud speech calls.
+- Application logging providers are removed. Request text, audio, and transcripts are not logged.
+  Windows WebM decoding uses a temporary `.webm` file and attempts deletion after decoding or
+  failure; hosts that require no transient content on disk should send PCM16 or WAV instead.
+
+### Launch contract and assets
+
+Arguments are discrete `--name value` pairs, so paths containing spaces remain one argument:
+
+```powershell
+& ".\Voxa.ArkeSidecar.exe" `
+  --host 127.0.0.1 `
+  --port 5901 `
+  --kokoro-model "C:\Arke\Speech\kokoro\model.onnx" `
+  --kokoro-config "C:\Arke\Speech\kokoro\config.json" `
+  --kokoro-voices "C:\Arke\Speech\kokoro\voices" `
+  --whisper-model "C:\Arke\Speech\whisper\ggml-base.en.bin" `
+  --espeak "C:\Arke\Speech\espeak\espeak-ng.exe" `
+  --espeak-data "C:\Arke\Speech\espeak\espeak-ng-data"
+```
+
+| Argument | Default | Required for capability | Meaning |
+|---|---|---|---|
+| `--host` | `127.0.0.1` | Service | Literal IPv4 or IPv6 loopback address. |
+| `--port` | `PORT`, then `5901` | Service | Integer from 1 through 65535; an explicit argument takes precedence over `PORT`. |
+| `--kokoro-model` | none | TTS | Existing Kokoro ONNX model file. |
+| `--kokoro-config` | none | TTS | Existing Kokoro config file. |
+| `--kokoro-voices` | none | TTS | Directory containing `af_bella.bin`, `af_nicole.bin`, `am_michael.bin`, `am_adam.bin`, `bf_emma.bin`, and `bm_george.bin`. |
+| `--whisper-model` | none | STT | Existing Whisper GGML model file. |
+| `--espeak` | none | TTS | Existing espeak-ng executable. |
+| `--espeak-data` | none | TTS | Existing `espeak-ng-data` directory, or its parent directory. |
+
+Models, voice files, the Kokoro config, and espeak-ng are **external deployment inputs**. They are not
+embedded in `Voxa.ArkeSidecar`, copied by `dotnet publish`, or downloaded by the running service.
+This differs deliberately from the general-purpose `VoxaModelCache`: the embedding host is
+responsible for acquisition, licensing, integrity checks, placement, and passing the exact paths.
+
+Kokoro runs in-process inside the sidecar, but phonemization invokes the supplied espeak-ng CLI as a
+separate child process and sends text over standard input. No Voxa assembly links espeak-ng; this is
+the GPL-3.0 boundary. The embedding application's distribution of espeak-ng and its data remains a
+separate licensing responsibility.
+
+Invalid argument shape, an unknown argument, a non-loopback host, or an invalid port prevents startup;
+argument errors write a short message to standard error and set exit code `2`. Missing speech assets
+do **not** prevent startup, which lets the desktop host inspect `/health` and present a degraded state.
+
+### HTTP protocol version 1
+
+All JSON uses camel-case property names. `GET /health` returns HTTP `200` while the service is
+running. A fully provisioned x64 process has this shape:
+
+```json
+{
+  "ok": true,
+  "version": "0.8.0",
+  "protocolVersion": 1,
+  "architecture": "x64",
+  "engines": ["kokoro", "whisper"],
+  "engineStatus": {
+    "kokoro": { "ready": true },
+    "whisper": { "ready": true }
+  }
+}
+```
+
+`architecture` is `x64`, `arm64`, or `unsupported`. `engines` names the protocol's engines; it is not
+an availability list. When assets are missing or an engine has failed, health adds a path-free reason:
+
+```json
+{
+  "ok": true,
+  "version": "0.8.0",
+  "protocolVersion": 1,
+  "architecture": "arm64",
+  "engines": ["kokoro", "whisper"],
+  "engineStatus": {
+    "kokoro": { "ready": false, "reason": "Kokoro is unavailable." },
+    "whisper": { "ready": true }
+  },
+  "unavailableReason": "Kokoro is unavailable."
+}
+```
+
+For protocol version 1, `ok: true` means the HTTP sidecar is alive; it does not guarantee both speech
+engines are ready. Hosts inspect `engineStatus` to gate each feature independently. The aggregate
+`unavailableReason` remains intentionally generic and does not expose configured paths or exceptions.
+
+| Endpoint | Request | Success response | Relevant failures |
+|---|---|---|---|
+| `GET /health` | none | Health JSON above. | A stopped/unreachable process is detected by the host. |
+| `GET /voices` | none | Static array of the six configured Kokoro voice descriptors. | The catalog remains available even when Kokoro assets are missing. |
+| `POST /tts` | JSON `{ "voice": "af_bella", "text": "Hello", "speed": 1.0 }` | Complete WAV body, `audio/wav`, at 24 kHz. | `400` for malformed input, unknown voice, empty/oversize text, or speed outside `0.92`, `1.0`, and `1.15`; `503` when Kokoro is unavailable. |
+| `POST /stt` | Audio request body, maximum 64 MiB. | JSON `{ "text": "hello" }`. | `413` over 64 MiB; `415` for empty, malformed, or unsupported audio; `503` when Whisper is unavailable. |
+
+`POST /stt` accepts 16 kHz mono PCM16 WAV (`audio/wav` or `audio/x-wav`), raw PCM16
+(`audio/pcm`, `audio/L16`, `application/octet-stream`, or no content type), and on Windows WebM
+(`audio/webm`) decoded through Media Foundation. `audio/L16` follows network byte order and is
+converted before inference. STT is batch transcription in English, not a streaming endpoint.
+`POST /tts` returns a complete WAV rather than streaming. TTS text is capped at 10,000 characters;
+synthesis is limited to two concurrent requests and transcription to one, bounding CPU and memory.
+
+### Failure and degradation behavior
+
+- Kokoro and Whisper availability is independent. Missing TTS assets do not disable STT, and a
+  missing Whisper model does not disable TTS.
+- Asset absence is re-evaluated by health and before each request. A runtime initialization or
+  inference failure marks that engine unavailable for the rest of the sidecar process; restart after
+  fixing or replacing its assets.
+- An unavailable engine returns an RFC 7807 problem response with `503`. There is no automatic cloud
+  fallback, credential lookup, or model download.
+- Hosts should treat a failed health call, process exit, protocol mismatch, or `503` as local speech
+  degradation, disable only the affected feature where possible, and keep the desktop application
+  running. `unavailableReason` is suitable for a general status message, not detailed diagnostics.
+
+### Self-contained Windows publishing
+
+Build one self-contained directory for each supported Windows architecture from the repository root:
+
+```powershell
+dotnet publish src/Voxa.ArkeSidecar/Voxa.ArkeSidecar.csproj -c Release -r win-x64 --self-contained true -o publish/Voxa.ArkeSidecar-win-x64
+dotnet publish src/Voxa.ArkeSidecar/Voxa.ArkeSidecar.csproj -c Release -r win-arm64 --self-contained true -o publish/Voxa.ArkeSidecar-win-arm64
+```
+
+Each output directory is an architecture-specific deployment unit containing the executable, .NET
+runtime, managed dependencies, ONNX Runtime, and WhisperCpp native runtime. Keep the entire directory
+together and launch the RID that matches the desktop process/machine. The commands above create local
+publish outputs only: this repository does not currently publish Arke sidecar release artifacts or
+run a smoke test against those packaged self-contained directories. Existing sidecar tests exercise
+argument parsing, loopback rules, endpoint contracts, and audio adaptation against the built project.
+
 ## Voxtral — cloud-grade STT, fully offline (VLS-009)
 
 whisper.cpp is keyless and runs anywhere, but it has no interims and its accurate models are slow on CPU

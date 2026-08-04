@@ -99,6 +99,8 @@ public static class KokoroDescriptors
 
         if (!string.IsNullOrEmpty(options.EspeakPath) && !File.Exists(options.EspeakPath))
             errors.Add($"Voxa:Kokoro:EspeakPath is set to '{options.EspeakPath}' but no file exists there.");
+        if (!string.IsNullOrEmpty(options.EspeakDataPath) && !Directory.Exists(options.EspeakDataPath))
+            errors.Add($"Voxa:Kokoro:EspeakDataPath is set to '{options.EspeakDataPath}' but no directory exists there.");
 
         var cacheOptions = VoxaModelCacheOptions.FromConfiguration(root);
         if (cacheOptions.Offline)

@@ -23,6 +23,9 @@ public sealed class KokoroOptions
     /// <summary>Explicit espeak-ng executable. Otherwise: <c>PATH</c> probe, then pinned download.</summary>
     public string? EspeakPath { get; set; }
 
+    /// <summary>Explicit parent directory containing <c>espeak-ng-data</c>, passed to espeak-ng as <c>--path</c>.</summary>
+    public string? EspeakDataPath { get; set; }
+
     /// <summary>
     /// espeak-ng voice for phonemization. Default: inferred from the Kokoro voice prefix
     /// (<c>a*</c> → <c>en-us</c>, <c>b*</c> → <c>en-gb</c>).
@@ -60,6 +63,7 @@ public sealed class KokoroOptions
             ModelPath              = s["ModelPath"],
             VoicePath              = s["VoicePath"],
             EspeakPath             = s["EspeakPath"],
+            EspeakDataPath         = s["EspeakDataPath"],
             EspeakVoice            = s["EspeakVoice"],
             Speed                  = s.GetValue("Speed", 1.0),
             Device                 = s["Device"],
