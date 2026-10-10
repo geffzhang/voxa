@@ -17,7 +17,8 @@ internal sealed record HealthResponse(
     string Architecture,
     string[] Engines,
     IReadOnlyDictionary<string, EngineHealth> EngineStatus,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? UnavailableReason)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? UnavailableReason,
+    EngineHealth? WordTiming = null)
 {
     public static string CurrentArchitecture => RuntimeInformation.ProcessArchitecture switch
     {
@@ -28,6 +29,10 @@ internal sealed record HealthResponse(
 }
 
 internal sealed record EngineHealth(bool Ready, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason);
+
+internal sealed record WordTimingEngine(string Id, string Version, string Model);
+internal sealed record TimedWord(string Text, double StartSec, double EndSec, double Probability);
+internal sealed record WordTimingResponse(string Text, double Seconds, WordTimingEngine Engine, IReadOnlyList<TimedWord> Words);
 
 internal sealed class TtsRequest
 {

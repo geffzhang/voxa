@@ -14,6 +14,8 @@ public class SidecarApplicationTests
             new Dictionary<string, EngineHealth> { ["kokoro"] = new(true, null), ["whisper"] = new(true, null) }, null);
         public TtsRequest? Tts { get; private set; }
         public byte[] SttAudio { get; private set; } = [];
+        public Exception? WordTimingFailure { get; set; }
+        public Func<CancellationToken, Task>? OnWords { get; set; }
 
         public Task<byte[]> SynthesizeAsync(TtsRequest request, CancellationToken ct)
         {
@@ -25,6 +27,15 @@ public class SidecarApplicationTests
         {
             SttAudio = audio.ToArray();
             return Task.FromResult("hello harbour");
+        }
+
+        public async Task<WordTimingResponse> TranscribeWordsAsync(ReadOnlyMemory<byte> audio, string? contentType, CancellationToken ct)
+        {
+            SttAudio = audio.ToArray();
+            if (OnWords is not null) await OnWords(ct);
+            if (WordTimingFailure is not null) throw WordTimingFailure;
+            return new("hello harbour", 1.8, new("whisper.cpp/dtw-word-boundaries-v1", "1.9.1", "sha256:fixture"),
+                [new("hello", 0.2, 0.51, 0.97), new("harbour", 0.72, 1.45, 0.89)]);
         }
     }
 
@@ -95,12 +106,87 @@ public class SidecarApplicationTests
     }
 
     [Fact]
+    public async Task Word_timing_is_additive_and_preserves_engine_bounds_and_identity()
+    {
+        var (app, client, fake) = await StartAsync();
+        await using (app)
+        using (client)
+        {
+            using var legacyHealth = JsonDocument.Parse(await client.GetStringAsync("/health"));
+            Assert.False(legacyHealth.RootElement.TryGetProperty("wordTiming", out _));
+            fake.Health = fake.Health with { WordTiming = new(true, null) };
+            using var health = JsonDocument.Parse(await client.GetStringAsync("/health"));
+            Assert.True(health.RootElement.GetProperty("wordTiming").GetProperty("ready").GetBoolean());
+            using var audio = new ByteArrayContent([1, 0, 2, 0]);
+            audio.Headers.ContentType = new("audio/wav");
+            using var response = await client.PostAsync("/stt/words", audio);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("hello harbour", result.GetProperty("text").GetString());
+            Assert.Equal(1.8, result.GetProperty("seconds").GetDouble());
+            Assert.Equal("sha256:fixture", result.GetProperty("engine").GetProperty("model").GetString());
+            Assert.Equal(0.72, result.GetProperty("words")[1].GetProperty("startSec").GetDouble());
+            Assert.Equal(0.89, result.GetProperty("words")[1].GetProperty("probability").GetDouble());
+            Assert.Equal([1, 0, 2, 0], fake.SttAudio);
+        }
+    }
+
+    [Theory]
+    [InlineData(415)]
+    [InlineData(422)]
+    [InlineData(503)]
+    public async Task Word_timing_failures_do_not_fall_back_to_plain_transcription(int status)
+    {
+        var (app, client, fake) = await StartAsync();
+        await using (app)
+        using (client)
+        {
+            fake.WordTimingFailure = status switch
+            {
+                415 => new InvalidDataException("Invalid audio."),
+                422 => new WordTimingRejectedException("Unusable timestamps."),
+                _ => new SidecarUnavailableException("Word timing is unavailable.")
+            };
+            using var response = await client.PostAsync("/stt/words", new ByteArrayContent([0, 0]));
+            Assert.Equal(status, (int)response.StatusCode);
+            var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.False(result.TryGetProperty("words", out _));
+            Assert.False(result.TryGetProperty("text", out _));
+        }
+    }
+
+    [Fact]
+    public async Task Disconnect_cancels_word_timing_work()
+    {
+        var (app, client, fake) = await StartAsync();
+        await using (app)
+        using (client)
+        using (var cancel = new CancellationTokenSource())
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fake.OnWords = async ct =>
+            {
+                entered.SetResult();
+                try { await Task.Delay(Timeout.Infinite, ct); }
+                catch (OperationCanceledException) { cancelled.SetResult(); throw; }
+            };
+            var request = client.PostAsync("/stt/words", new ByteArrayContent([0, 0]), cancel.Token);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
     public async Task Missing_assets_start_and_report_safe_unavailable_reason()
     {
         var runtime = new SidecarSpeechRuntime(SidecarOptions.Parse(["--host", "127.0.0.1", "--port", "5901"]));
         var health = runtime.Health;
         Assert.True(health.Ok);
         Assert.Equal("Kokoro is unavailable. Whisper is unavailable.", health.UnavailableReason);
+        Assert.False(health.WordTiming!.Ready);
         Assert.DoesNotContain(Path.GetTempPath(), health.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         await runtime.DisposeAsync();
     }

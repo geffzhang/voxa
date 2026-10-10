@@ -46,7 +46,10 @@ internal static class SidecarApplication
         app.MapGet("/health", (ISidecarSpeechRuntime speech) => Results.Json(speech.Health));
         app.MapGet("/voices", () => Results.Json(VoiceCatalog.Voices));
         app.MapPost("/tts", HandleTtsAsync);
-        app.MapPost("/stt", HandleSttAsync);
+        app.MapPost("/stt", (HttpRequest request, ISidecarSpeechRuntime speech, CancellationToken ct) =>
+            HandleSttAsync(request, speech, ct, words: false));
+        app.MapPost("/stt/words", (HttpRequest request, ISidecarSpeechRuntime speech, CancellationToken ct) =>
+            HandleSttAsync(request, speech, ct, words: true));
         return app;
     }
 
@@ -64,7 +67,7 @@ internal static class SidecarApplication
         catch (SidecarUnavailableException ex) { return Problem(StatusCodes.Status503ServiceUnavailable, ex.Message); }
     }
 
-    private static async Task<IResult> HandleSttAsync(HttpRequest request, ISidecarSpeechRuntime speech, CancellationToken ct)
+    private static async Task<IResult> HandleSttAsync(HttpRequest request, ISidecarSpeechRuntime speech, CancellationToken ct, bool words)
     {
         try
         {
@@ -73,11 +76,14 @@ internal static class SidecarApplication
             using var body = new MemoryStream();
             await request.Body.CopyToAsync(body, ct).ConfigureAwait(false);
             if (body.Length > MaxAudioBytes) return Problem(StatusCodes.Status413PayloadTooLarge, "Audio body exceeds 64 MiB.");
+            if (words) return Results.Json(await speech.TranscribeWordsAsync(
+                body.GetBuffer().AsMemory(0, checked((int)body.Length)), request.ContentType, ct).ConfigureAwait(false));
             var text = await speech.TranscribeAsync(
                 body.GetBuffer().AsMemory(0, checked((int)body.Length)), request.ContentType, ct).ConfigureAwait(false);
             return Results.Json(new { text });
         }
         catch (InvalidDataException ex) { return Problem(StatusCodes.Status415UnsupportedMediaType, ex.Message); }
+        catch (WordTimingRejectedException ex) { return Problem(StatusCodes.Status422UnprocessableEntity, ex.Message); }
         catch (SidecarUnavailableException ex) { return Problem(StatusCodes.Status503ServiceUnavailable, ex.Message); }
     }
 

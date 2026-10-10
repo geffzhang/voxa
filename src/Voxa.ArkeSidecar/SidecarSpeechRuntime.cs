@@ -15,6 +15,8 @@ internal sealed class SidecarSpeechRuntime : ISidecarSpeechRuntime, IAsyncDispos
     private readonly SemaphoreSlim _sttGate = new(1, 1);
     private string? _kokoroFailure;
     private string? _whisperFailure;
+    private string? _wordTimingFailure;
+    private readonly NativeWordTranscriber _words = new();
 
     public SidecarSpeechRuntime(SidecarOptions options)
     {
@@ -41,7 +43,9 @@ internal sealed class SidecarSpeechRuntime : ISidecarSpeechRuntime, IAsyncDispos
                     ["kokoro"] = new(kokoro is null, kokoro is null ? null : "Kokoro is unavailable."),
                     ["whisper"] = new(whisper is null, whisper is null ? null : "Whisper is unavailable."),
                 },
-                unavailable);
+                unavailable,
+                new EngineHealth(whisper is null && _wordTimingFailure is null,
+                    whisper is null ? _wordTimingFailure : "Whisper is unavailable."));
         }
     }
 
@@ -120,7 +124,25 @@ internal sealed class SidecarSpeechRuntime : ISidecarSpeechRuntime, IAsyncDispos
             catch { }
         }
         _ttsGate.Dispose();
+        await _sttGate.WaitAsync().ConfigureAwait(false);
+        try { await _words.DisposeAsync().ConfigureAwait(false); }
+        finally { _sttGate.Release(); }
         _sttGate.Dispose();
+    }
+
+    public async Task<WordTimingResponse> TranscribeWordsAsync(ReadOnlyMemory<byte> audio, string? contentType, CancellationToken ct)
+    {
+        EnsureWhisperAvailable();
+        if (_wordTimingFailure is not null) throw new SidecarUnavailableException(_wordTimingFailure);
+        var pcm = AudioInput.ToWhisperPcm(audio.Span, contentType);
+        await _sttGate.WaitAsync(ct).ConfigureAwait(false);
+        try { return await _words.TranscribeAsync(_options.WhisperModel!, pcm, ct).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is not OperationCanceledException and not WordTimingRejectedException and not InvalidDataException)
+        {
+            _wordTimingFailure = "Word timing is unavailable.";
+            throw new SidecarUnavailableException(_wordTimingFailure);
+        }
+        finally { _sttGate.Release(); }
     }
 
     private async Task<KokoroTtsEngine> CreateTtsAsync(string voice, double speed, CancellationToken ct)
