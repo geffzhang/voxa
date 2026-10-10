@@ -746,6 +746,32 @@ cache        ├──▶ WS2 Piper      (needs WS0)      │     sample + CI e2
   <tr><td>Additional voice/model catalog breadth</td><td>Catalog bumps are cheap, tested code changes; start curated</td><td>Continuously, by request</td></tr>
 </table>
 
+<h2 id="arke-word-timing">Arke sidecar amendment · 2026-10-10</h2>
+<p>The separate desktop sidecar exposes additive batch word timing for authored-audio captions.
+This does not change the streaming engine interface or promise timestamp accuracy for every recording.</p>
+<ul>
+  <li><b>VLS-001 AWT-1:</b> <code>GET /health</code> advertises optional <code>wordTiming</code>
+    readiness independently of plain transcription; absence means unsupported.</li>
+  <li><b>AWT-2:</b> <code>POST /stt/words</code> shares <code>/stt</code>'s audio formats, 64 MiB body
+    bound, loopback-only boundary, single inference gate and request cancellation. It returns the
+    transcript, decoded duration, path-free engine/version/model digest and word text/start/end/confidence.</li>
+  <li><b>AWT-3:</b> Word intervals use consecutive cross-attention DTW token boundaries across segments,
+    with the final token ending at the decoded window boundary. Join subwords with outer bounds and minimum
+    confidence; tighten at the first sustained near-silence using decoded PCM energy (10 ms frames,
+    at least 120 ms below -70 dBFS). Reject silent or unresolved intervals longer than 2.5 seconds.
+    Never use heuristic token Start/End fields, redistribute sentence duration, manufacture
+    intervals from text length, or silently repair invalid timestamps. Reject unusable intervals with
+    <code>422</code>. Select tested base.en alignment heads by catalog model digest, not filename.
+    Avoid the pinned native callback's later-window omission with independent windows of at most
+    28 seconds, split only inside measured silence; refuse long audio without a safe split.</li>
+  <li><b>AWT-4:</b> Consumers must verify authored-text correspondence, confidence and exact audio/text
+    identity before highlighting. Plain <code>/stt</code> remains compatible. Timing failure leaves plain
+    transcription available unless its engine independently fails; no cloud fallback or model downloads.</li>
+  <li><b>AWT-5:</b> Verify HTTP compatibility, cancellation and rejected bounds with model-free tests,
+    plus nonuniform monotonic bounds, passages beyond 30 seconds and deliberate silent pauses from
+    the cached real-model speech fixture under <code>LocalModels</code>.</li>
+</ul>
+
 </div>
 </body>
 </html>

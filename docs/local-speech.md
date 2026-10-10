@@ -172,6 +172,7 @@ engines are ready. Hosts inspect `engineStatus` to gate each feature independent
 | `GET /voices` | none | Static array of the six configured Kokoro voice descriptors. | The catalog remains available even when Kokoro assets are missing. |
 | `POST /tts` | JSON `{ "voice": "af_bella", "text": "Hello", "speed": 1.0 }` | Complete WAV body, `audio/wav`, at 24 kHz. | `400` for malformed input, unknown voice, empty/oversize text, or speed outside `0.92`, `1.0`, and `1.15`; `503` when Kokoro is unavailable. |
 | `POST /stt` | Audio request body, maximum 64 MiB. | JSON `{ "text": "hello" }`. | `413` over 64 MiB; `415` for empty, malformed, or unsupported audio; `503` when Whisper is unavailable. |
+| `POST /stt/words` | Same audio formats and 64 MiB bound as `/stt`. | Transcript, duration, engine identity and word intervals described below. | Same input/unavailable failures as `/stt`; `422` when native timestamps cannot form usable word intervals. |
 
 `POST /stt` accepts 16 kHz mono PCM16 WAV (`audio/wav` or `audio/x-wav`), raw PCM16
 (`audio/pcm`, `audio/L16`, `application/octet-stream`, or no content type), and on Windows WebM
@@ -179,6 +180,58 @@ engines are ready. Hosts inspect `engineStatus` to gate each feature independent
 converted before inference. STT is batch transcription in English, not a streaming endpoint.
 `POST /tts` returns a complete WAV rather than streaming. TTS text is capped at 10,000 characters;
 synthesis is limited to two concurrent requests and transcription to one, bounding CPU and memory.
+
+### Optional word timing
+
+New sidecars add `wordTiming: { "ready": true }` to health when the Whisper assets are available;
+an unavailable capability includes a generic, path-free `reason`. Older sidecars omit this field.
+Hosts must treat an absent or false capability as unavailable, independently of plain transcription.
+Requests to `/stt/words` share the single STT inference gate and cancel when the caller disconnects.
+
+```json
+{
+  "text": "Hello harbour.",
+  "seconds": 1.8,
+  "engine": {
+    "id": "whisper.cpp/dtw-word-boundaries-v1",
+    "version": "1.9.1.0",
+    "model": "sha256:<digest-of-loaded-model>"
+  },
+  "words": [
+    { "text": "Hello", "startSec": 0.2, "endSec": 0.51, "probability": 0.97 },
+    { "text": "harbour.", "startSec": 0.72, "endSec": 1.45, "probability": 0.89 }
+  ]
+}
+```
+
+The numbers above illustrate the response shape. Intervals are seconds in the submitted audio;
+duration comes from decoded PCM. Cross-attention DTW supplies token boundaries at 20 ms resolution.
+Each token starts at its DTW boundary and ends at the next token boundary across recognition segments,
+with the final token ending at the decoded window boundary. Subwords and punctuation join using the
+outer bounds and lowest token probability. The first sustained near-silence in the decoded PCM tightens the end boundary
+(10 ms energy windows, at least 120 ms below -70 dBFS). Silent intervals and unresolved intervals
+longer than 2.5 seconds are rejected. This is an explicit alignment interval convention; it does not
+claim phoneme-level speech offsets. The sidecar never uses Whisper's heuristic `Start`/`End` token fields, which can split
+duration proportionally by text length. Invalid, overlapping, zero-duration or indivisible multi-word
+bounds return `422` rather than guessed timings. Native ASR timestamps are estimates, not a guarantee of alignment
+accuracy: the host must validate transcript correspondence and confidence before highlighting authored
+words, and bind saved timing to the exact audio and text. Silence can return an empty transcript and
+word array. A rejected recording does not mark the engine unavailable; a runtime failure does.
+The pinned native library can omit later DTW callbacks beyond its first 30-second window.
+Inference therefore uses windows of at most 28 seconds, split only inside measured silence,
+with absolute audio offsets preserved. A long recording without a safe silent split returns `422`.
+DTW currently supports the catalog-pinned `base.en` model supplied by Arke. Its SHA-256 selects the
+matching alignment heads, independent of filename; other models leave plain STT usable but refuse
+word timing. No assets are downloaded or upgraded by this endpoint.
+
+Validate the sidecar with `dotnet test tests/Voxa.ArkeSidecar.Tests --filter "Category!=LocalModels"`.
+The additional `Category=LocalModels` test uses the checked-in JFK recording, a version repeated
+past 30 seconds with deliberate pauses, and cached `base.en`;
+on first run the test's ordinary SHA-256-verified cache resolver provisions the model. The CI cache
+epoch includes this additional model before its network-blocked pass. Set `VOXA_WORD_TIMING_TEST_MODEL`
+to use an explicitly provisioned `base.en` file without test-time downloads. The noisy historic
+fixture contains low-confidence words: endpoint success verifies transport and acoustic bounds,
+not eligibility to highlight that transcript in a host with a stricter confidence gate.
 
 ### Failure and degradation behavior
 

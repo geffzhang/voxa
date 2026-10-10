@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Arke word timing:** optional `wordTiming` health capability and `POST /stt/words`
+  return Whisper cross-attention DTW word intervals, confidence, audio duration and a path-free model/engine
+  identity. Subword bounds are joined without allocating sentence duration across words;
+  unusable or overlapping bounds return `422`. The existing plain `/stt` response is unchanged.
+
 ### Fixed
 
 - **`SentenceAggregator` flushes the trailing fragment at turn end (Pipecat parity).** It flushed on a
