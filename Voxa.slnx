@@ -19,6 +19,7 @@
     <Project Path="src/Voxa.Audio.Abstractions/Voxa.Audio.Abstractions.csproj" />
     <Project Path="src/Voxa.Audio.Diarization/Voxa.Audio.Diarization.csproj" />
     <Project Path="src/Voxa.Audio.Diarization.Onnx/Voxa.Audio.Diarization.Onnx.csproj" />
+    <Project Path="src/Voxa.Audio.Diarization.Streaming/Voxa.Audio.Diarization.Streaming.csproj" />
     <Project Path="src/Voxa.Audio.Onnx/Voxa.Audio.Onnx.csproj" />
     <Project Path="src/Voxa.Audio.SileroVad/Voxa.Audio.SileroVad.csproj" />
     <Project Path="src/Voxa.Audio.SmartTurn/Voxa.Audio.SmartTurn.csproj" />
@@ -59,6 +60,7 @@
     <Project Path="tests/Voxa.Audio.Abstractions.Tests/Voxa.Audio.Abstractions.Tests.csproj" />
     <Project Path="tests/Voxa.Audio.Diarization.Tests/Voxa.Audio.Diarization.Tests.csproj" />
     <Project Path="tests/Voxa.Audio.Diarization.Onnx.Tests/Voxa.Audio.Diarization.Onnx.Tests.csproj" />
+    <Project Path="tests/Voxa.Audio.Diarization.Streaming.Tests/Voxa.Audio.Diarization.Streaming.Tests.csproj" />
     <Project Path="tests/Voxa.Audio.Onnx.Tests/Voxa.Audio.Onnx.Tests.csproj" />
     <Project Path="tests/Voxa.Audio.SileroVad.Tests/Voxa.Audio.SileroVad.Tests.csproj" />
     <Project Path="tests/Voxa.Audio.SmartTurn.Tests/Voxa.Audio.SmartTurn.Tests.csproj" />

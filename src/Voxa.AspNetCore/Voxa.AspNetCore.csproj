@@ -43,6 +43,7 @@
     -->
     <ProjectReference Include="..\Voxa.Speech.Abstractions\Voxa.Speech.Abstractions.csproj" />
     <ProjectReference Include="..\Voxa.Audio.Abstractions\Voxa.Audio.Abstractions.csproj" />
+    <ProjectReference Include="..\Voxa.Audio.Diarization.Streaming\Voxa.Audio.Diarization.Streaming.csproj" />
     <ProjectReference Include="..\Voxa.Services.MicrosoftAgents\Voxa.Services.MicrosoftAgents.csproj" />
   </ItemGroup>
 

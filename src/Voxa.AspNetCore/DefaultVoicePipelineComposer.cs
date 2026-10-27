@@ -6,6 +6,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Voxa.Audio;
+using Voxa.Audio.Diarization;
+using Voxa.Audio.Diarization.Streaming;
 using Voxa.Frames;
 using Voxa.Processors;
 using Voxa.Services.MicrosoftAgents;
@@ -136,6 +138,39 @@ public sealed class DefaultVoicePipelineComposer
             }
         }
 
+        // 0.7 Streaming speaker diarization (VLS-011) — on the RAW input, before the VAD: diarization needs the
+        //     continuous stream (silence included), and the VAD keeps only what it gates open. Inserted only when
+        //     configured AND the host registered both model seams, so the default chain is byte-identical and a
+        //     missing engine warns instead of failing the session. The stage also owns the input audio clock, which is
+        //     what lets downstream transcripts carry their span (and therefore be attributed at all).
+        SpeakerDiarizationOptions? diarizationOptions = null;
+        if (!string.Equals(o.Diarization.Engine, "None", StringComparison.OrdinalIgnoreCase))
+        {
+            var segmentation = services.GetService<ISpeakerMaskSegmentation>();
+            var embedding = services.GetService<ISpeakerEmbedding>();
+            if (!string.Equals(o.Diarization.Engine, "Streaming", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Voxa:Diarization:Engine '{Engine}' is not a known diarization engine (expected 'Streaming'); " +
+                    "running without speaker diarization.", o.Diarization.Engine);
+            }
+            else if (segmentation is null || embedding is null)
+            {
+                _logger.LogWarning(
+                    "Voxa:Diarization:Engine is 'Streaming' but {Missing} is not registered; running without speaker " +
+                    "diarization. Register an ISpeakerMaskSegmentation and an ISpeakerEmbedding (Voxa.Audio.Diarization.Onnx " +
+                    "ships the pyannote mask engine).",
+                    segmentation is null ? "ISpeakerMaskSegmentation" : "ISpeakerEmbedding");
+            }
+            else
+            {
+                diarizationOptions = BuildDiarizationOptions(o.Diarization, inputSampleRate);
+                var options = diarizationOptions;
+                parts.Add(sp => new SpeakerDiarizationProcessor(
+                    segmentation, embedding, options, sp.GetService<ILogger<SpeakerDiarizationProcessor>>()));
+            }
+        }
+
         // 1. VAD (engine names are case-insensitive, matching Profile and provider lookups)
         if (!string.Equals(o.Vad.Engine, "None", StringComparison.OrdinalIgnoreCase))
         {
@@ -182,6 +217,13 @@ public sealed class DefaultVoicePipelineComposer
         // 3. Transcription filter. The Stt tap sits after it so diagnostics report the
         // transcripts that actually drive the agent, not ones the filter rejected.
         parts.Add(_ => new TranscriptionFilter());
+
+        // 3.5 Transcript attribution (VLS-011) — immediately after filtering, so the label lands on the transcripts
+        //     that actually drive the agent (and the Stt diagnostics tap below already reports SpeakerId). Off when
+        //     diarization is not composed, or when the host asked for segments only.
+        if (diarizationOptions is { AttributeTranscripts: true } attribution)
+            parts.Add(_ => new SpeakerAttributionProcessor(attribution.Attribution));
+
         Tap(Voxa.Diagnostics.DiagnosticsTapScope.Stt);
 
         // 4. Agent. Built-in conversation memory unless a host IVoiceAgentConfigurator owns it (VDX-006).
@@ -226,6 +268,40 @@ public sealed class DefaultVoicePipelineComposer
             Parts:            parts,
             InputSampleRate:  inputSampleRate,
             OutputSampleRate: outputSampleRate);
+    }
+
+    /// <summary>
+    /// Translate the config block into the streaming stages' options. Window/hop arrive in wall-clock ms (what a host
+    /// writes in appsettings) and are snapped to the 10 ms frame grid the segmentation models use, so a rounded
+    /// value can never fail the diarizer's geometry validation at session start.
+    /// </summary>
+    private static SpeakerDiarizationOptions BuildDiarizationOptions(VoxaDiarizationOptions o, int sampleRate)
+    {
+        const int frameMs = 10;
+        int Snap(int ms) => Math.Max(frameMs, ms / frameMs * frameMs) * sampleRate / 1000;
+
+        var defaults = new StreamingDiarizerConfig();
+        var diarizer = defaults with
+        {
+            SampleRate = sampleRate,
+            WindowSamples = o.WindowMs is { } windowMs && windowMs > 0 ? Snap(windowMs) : 0,
+            HopSamples = o.HopMs is { } hopMs && hopMs > 0 ? Snap(hopMs) : 0,
+            MatchThreshold = o.MatchThreshold ?? defaults.MatchThreshold,
+            NewSpeakerThreshold = o.NewSpeakerThreshold ?? defaults.NewSpeakerThreshold,
+            MaxSpeakers = o.MaxSpeakers is { } max && max > 0 ? max : defaults.MaxSpeakers,
+        };
+
+        var attribution = new SpeakerAttributionOptions
+        {
+            ContinuityWindow = o.ContinuityWindowSeconds ?? new SpeakerAttributionOptions().ContinuityWindow,
+        };
+
+        return new SpeakerDiarizationOptions
+        {
+            Diarizer = diarizer,
+            AttributeTranscripts = o.AttributeTranscripts,
+            Attribution = attribution,
+        };
     }
 
     /// <summary>

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>Voxa.Audio.Diarization.Streaming</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Authors>Voxa contributors</Authors>
+    <Description>Streaming (online) speaker diarization for the Voxa pipeline (VLS-011): a frame processor that mirrors input audio into the incremental diarizer on a bounded queue (never blocking the data loop) and publishes SpeakerSegmentFrame updates, plus a transcript-attribution processor that fills TranscriptionFrame.SpeakerId by audio-timeline overlap. Runtime-free orchestration lives in Voxa.Audio.Diarization; the model seams are registered by the host.</Description>
+    <PackageTags>voxa;voice;ai;diarization;streaming;speaker;realtime</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Voxa.Audio.Diarization.Streaming.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Voxa.Core\Voxa.Core.csproj" />
+    <ProjectReference Include="..\Voxa.Audio.Diarization\Voxa.Audio.Diarization.csproj" />
+  </ItemGroup>
+
+</Project>

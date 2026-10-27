@@ -29,6 +29,7 @@ public sealed class VoxaOptions
     public VoxaVadOptions Vad { get; set; } = new();
     public VoxaAecOptions Aec { get; set; } = new();
     public VoxaEnhanceOptions Enhance { get; set; } = new();
+    public VoxaDiarizationOptions Diarization { get; set; } = new();
     public VoxaAgentOptions Agent { get; set; } = new();
     public VoxaBackgroundAgentOptions BackgroundAgent { get; set; } = new();
     public VoxaAggregatorOptions Aggregator { get; set; } = new();
@@ -138,6 +139,49 @@ public sealed class VoxaEnhanceOptions
 {
     /// <summary>"None" (default) or a registered enhancer engine name (e.g. "DeepFilterNet3").</summary>
     public string Engine { get; set; } = "None";
+}
+
+/// <summary>
+/// Streaming speaker diarization (VLS-011). "None" (default) inserts no diarization stage — the composed pipeline is
+/// byte-identical to today. "Streaming" inserts a <c>SpeakerDiarizationProcessor</c> on the raw input (before the VAD,
+/// where the continuous stream still exists) and, unless disabled, a <c>SpeakerAttributionProcessor</c> after STT.
+///
+/// <para>Both model seams must be registered by the host (<c>ISpeakerMaskSegmentation</c>, <c>ISpeakerEmbedding</c>) —
+/// the same pair the batch pipeline composes, so one registration serves both paths. When they are missing the
+/// composer warns and runs without diarization rather than failing the session.</para>
+/// </summary>
+public sealed class VoxaDiarizationOptions
+{
+    /// <summary>"None" (default) or "Streaming".</summary>
+    public string Engine { get; set; } = "None";
+
+    /// <summary>
+    /// Model window in ms (null ⇒ the model's own geometry). This is the latency/accuracy knob: a segment can only be
+    /// committed once the window owning its centre has run, so lookahead is <c>(window − hop) / 2</c>. A shorter
+    /// window lowers the lag and costs the model context.
+    /// </summary>
+    public int? WindowMs { get; set; }
+
+    /// <summary>Advance between windows in ms (null ⇒ 10% of the window).</summary>
+    public int? HopMs { get; set; }
+
+    /// <summary>Cosine-distance ceiling for "this is a known speaker" (null ⇒ 0.45).</summary>
+    public double? MatchThreshold { get; set; }
+
+    /// <summary>Cosine distance above which a well-evidenced turn starts a new speaker (null ⇒ 0.62).</summary>
+    public double? NewSpeakerThreshold { get; set; }
+
+    /// <summary>Hard speaker cap (null ⇒ 10). Reaching it attaches new turns to the nearest speaker.</summary>
+    public int? MaxSpeakers { get; set; }
+
+    /// <summary>
+    /// Label transcripts from the segment stream (default true). Off ⇒ segments are still published (a host can consume
+    /// <c>SpeakerSegmentFrame</c> itself) but <c>TranscriptionFrame.SpeakerId</c> is left to the engine.
+    /// </summary>
+    public bool AttributeTranscripts { get; set; } = true;
+
+    /// <summary>How far before a transcript a settled segment may sit and still lend its speaker (null ⇒ 1.5 s).</summary>
+    public double? ContinuityWindowSeconds { get; set; }
 }
 
 /// <summary>
