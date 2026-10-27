@@ -43,3 +43,6 @@ Thumbs.db
 
 # Local-only analysis notes (competitive reviews etc.) — never committed
 docs/code-analysis/*.local.html
+
+# Local agent workspace (project memory/logs) — not part of the repository
+.workbuddy/
