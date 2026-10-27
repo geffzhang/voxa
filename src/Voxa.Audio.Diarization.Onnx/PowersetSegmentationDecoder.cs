@@ -60,6 +60,56 @@ internal static class PowersetSegmentationDecoder
     }
 
     /// <summary>
+    /// The <b>speaker-level</b> decode (VLS-011): softmax the frame's powerset logits, then marginalise onto the
+    /// local speakers — <c>p[s] = Σ softmax[c]</c> over every class <c>c</c> whose powerset row activates <c>s</c>.
+    ///
+    /// <para>This is what "do not flatten the powerset too early" means in practice. Collapsing to speech/silence
+    /// throws away (a) <i>which</i> local speaker is talking, so a hand-over becomes one merged region; (b) the
+    /// <i>second</i> active speaker, so overlapping speech disappears; and (c) the probability itself, so the
+    /// orchestrator cannot tell a confident frame from a borderline one. The marginal keeps all three: two
+    /// non-zero entries on a frame are two people talking, and the value is the confidence the turn policy needs.</para>
+    /// </summary>
+    /// <param name="frameLogits">One frame's raw powerset logits (<c>num_classes</c> wide).</param>
+    /// <param name="mapping">The powerset mapping from <see cref="BuildPowersetMapping"/>.</param>
+    /// <param name="destination">Receives one probability per local speaker; cleared first.</param>
+    public static void FrameSpeakerProbabilities(
+        ReadOnlySpan<float> frameLogits, float[][] mapping, Span<float> destination)
+    {
+        if (frameLogits.Length != mapping.Length)
+            throw new ArgumentException(
+                $"Frame has {frameLogits.Length} logits but the powerset mapping has {mapping.Length} classes.");
+        int speakers = mapping.Length == 0 ? 0 : mapping[0].Length;
+        if (destination.Length != speakers)
+            throw new ArgumentException(
+                $"Destination must hold {speakers} local speakers; got {destination.Length}.");
+
+        destination.Clear();
+        if (speakers == 0) return;
+
+        // Numerically-stable softmax (subtract the max logit) over the powerset classes.
+        float max = frameLogits[0];
+        for (int c = 1; c < frameLogits.Length; c++) if (frameLogits[c] > max) max = frameLogits[c];
+
+        Span<double> probabilities = frameLogits.Length <= 64 ? stackalloc double[frameLogits.Length] : new double[frameLogits.Length];
+        double sum = 0;
+        for (int c = 0; c < frameLogits.Length; c++)
+        {
+            double e = Math.Exp(frameLogits[c] - max);
+            probabilities[c] = e;
+            sum += e;
+        }
+        if (sum <= 0) return;
+
+        for (int c = 0; c < frameLogits.Length; c++)
+        {
+            double p = probabilities[c] / sum;
+            var row = mapping[c];
+            for (int s = 0; s < row.Length; s++)
+                if (row[s] > 0) destination[s] += (float)p;
+        }
+    }
+
+    /// <summary>
     /// Stitch the per-window binary activity onto one global frame timeline (Hamming-weighted overlap-add),
     /// binarise with onset/offset, and emit absolute-time <see cref="SpeechRegion"/>s.
     /// </summary>
