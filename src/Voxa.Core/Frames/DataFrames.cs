@@ -1,14 +1,42 @@
 namespace Voxa.Frames;
 
 /// <summary>Raw PCM audio chunk. Encoding fixed by <see cref="StartFrame"/> at session start.</summary>
-public sealed record AudioRawFrame(ReadOnlyMemory<byte> Pcm, int SampleRate, int Channels) : DataFrame;
+public sealed record AudioRawFrame(ReadOnlyMemory<byte> Pcm, int SampleRate, int Channels) : DataFrame
+{
+    /// <summary>
+    /// Absolute index of this chunk's first sample on the session's input timeline — set by whichever stage owns the
+    /// clock (VLS-011: the diarization processor stamps every chunk it forwards, so the transcript span and the
+    /// speaker timeline are the same clock, not two clocks that have to be reconciled).
+    ///
+    /// <para><c>null</c> means "not stamped": the default for every pipeline that does not enable streaming
+    /// diarization, which is why this is an optional init property rather than a construction argument. A stage that
+    /// replays audio (the VAD's pre-roll) keeps the original stamps, so a replayed chunk still points at the audio
+    /// position it actually came from.</para>
+    /// </summary>
+    public long? StartSample { get; init; }
+}
 
-/// <summary>STT output. <c>IsFinal=false</c> for interim hypotheses, <c>true</c> when the utterance settles.</summary>
+/// <summary>
+/// STT output. <c>IsFinal=false</c> for interim hypotheses, <c>true</c> when the utterance settles.
+///
+/// <para><see cref="StartTime"/> / <see cref="EndTime"/> are the utterance's span in absolute seconds on the session
+/// audio timeline (the same clock <see cref="SpeakerSegmentFrame.Start"/> uses), populated only when a stage stamped
+/// the audio with <see cref="AudioRawFrame.StartSample"/> — i.e. when streaming diarization is enabled. They are what
+/// lets a consumer join a transcript against speaker segments, and what lets the attribution processor decide which
+/// speaker a text that crosses a speaker change belongs to.</para>
+/// </summary>
 public sealed record TranscriptionFrame(
     string Text,
     bool IsFinal,
     string? Language = null,
-    string? SpeakerId = null) : DataFrame;
+    string? SpeakerId = null) : DataFrame
+{
+    /// <summary>Start of the utterance this text covers, in absolute session seconds; <c>null</c> when untimed.</summary>
+    public double? StartTime { get; init; }
+
+    /// <summary>End of the utterance this text covers, in absolute session seconds; <c>null</c> when untimed.</summary>
+    public double? EndTime { get; init; }
+}
 
 /// <summary>Generic text chunk in the pipeline. Often produced by adapters or pre/post-processors.</summary>
 public sealed record TextFrame(string Text) : DataFrame;

@@ -29,6 +29,15 @@ public sealed class SpeechToTextProcessor : FrameProcessor
     private long _activeSpecId;
     private bool _inUtterance; // true between UserStarted and UserStopped; gates stale (backlogged) arms
 
+    // Audio-clock bookkeeping for the utterance span (VLS-011). Written on the data loop, read on the read loop;
+    // plain longs with a -1 sentinel because an aligned 64-bit access is atomic on every platform Voxa targets,
+    // whereas Nullable<long> could tear. A stale read costs a slightly wrong timestamp, never a crash.
+    private long _utteranceStartSample = -1;
+    private long _utteranceEndSample = -1;
+    private long _lastAudioEndSample = -1;
+    private bool _awaitingUtteranceStart;
+    private int _inputSampleRate;
+
     /// <summary>Construct with an existing engine instance (one-shot use).</summary>
     public SpeechToTextProcessor(ISpeechToTextEngine engine, ILogger? logger = null)
         : this(() => engine, logger) { }
@@ -87,7 +96,9 @@ public sealed class SpeechToTextProcessor : FrameProcessor
             switch (frame)
             {
                 case AudioRawFrame audio:
-                    // Audio is consumed by STT; transcriptions come back via the read loop.
+                    // Audio is consumed by STT; transcriptions come back via the read loop. Observe the audio clock
+                    // first: the utterance's span is what a transcript is stamped with (VLS-011).
+                    ObserveAudio(audio);
                     await _engine.WriteAudioAsync(audio.Pcm, ct).ConfigureAwait(false);
                     return;
 
@@ -99,6 +110,11 @@ public sealed class SpeechToTextProcessor : FrameProcessor
                 case UserStartedSpeakingFrame:
                     // A new utterance is starting: mark it active and clear any stale eager state — a held final
                     // or pending arm left by a misordered prior utterance — so it can't promote into this turn.
+                    // The span starts at the next audio frame, not here: the VAD replays pre-roll *after* this
+                    // frame, and those replayed chunks carry the earlier (true) position.
+                    _awaitingUtteranceStart = true;
+                    _utteranceStartSample = _lastAudioEndSample;
+                    _utteranceEndSample = -1;
                     lock (_specLock)
                     {
                         _inUtterance = true;
@@ -207,7 +223,37 @@ public sealed class SpeechToTextProcessor : FrameProcessor
         // UserStopped-then-transcript ordering the sink and downstream stages expect.
         await PushFrameAsync(frame, ct).ConfigureAwait(false);
         if (promoted is not null)
-            await PushFrameAsync(new TranscriptionFrame(promoted.Text, promoted.IsFinal, promoted.Language), ct).ConfigureAwait(false);
+            await PushFrameAsync(CreateTranscription(promoted.Text, promoted.IsFinal, promoted.Language), ct).ConfigureAwait(false);
+    }
+
+    // Keep the audio clock current, and remember where the utterance being transcribed actually lies in the stream.
+    private void ObserveAudio(AudioRawFrame audio)
+    {
+        _inputSampleRate = audio.SampleRate;
+        if (audio.StartSample is not { } start) return; // unstamped ⇒ this session has no audio clock
+
+        int channels = Math.Max(1, audio.Channels);
+        long end = start + audio.Pcm.Length / 2 / channels;
+        if (_awaitingUtteranceStart)
+        {
+            _utteranceStartSample = start;
+            _awaitingUtteranceStart = false;
+        }
+        _utteranceEndSample = end;
+        _lastAudioEndSample = end;
+    }
+
+    // Stamp a transcript with its utterance's span when the audio was clocked. Untimed is the honest answer for a
+    // pipeline without diarization, so the frame simply carries no times rather than an invented zero.
+    private TranscriptionFrame CreateTranscription(string text, bool isFinal, string? language)
+    {
+        var frame = new TranscriptionFrame(text, isFinal, language);
+        long start = _utteranceStartSample;
+        if (start < 0 || _inputSampleRate <= 0) return frame;
+
+        long end = Math.Max(_utteranceEndSample, start);
+        double rate = _inputSampleRate;
+        return frame with { StartTime = start / rate, EndTime = end / rate };
     }
 
     private async Task ReadLoopAsync(CancellationToken ct)
@@ -227,7 +273,7 @@ public sealed class SpeechToTextProcessor : FrameProcessor
                     var now = Environment.TickCount64;
                     if (now - lastInterimTicks < InterimMinInterval.TotalMilliseconds) continue;
                     lastInterimTicks = now;
-                    await PushFrameAsync(new TranscriptionFrame(t.Text, IsFinal: false, t.Language), ct).ConfigureAwait(false);
+                    await PushFrameAsync(CreateTranscription(t.Text, isFinal: false, t.Language), ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -256,7 +302,7 @@ public sealed class SpeechToTextProcessor : FrameProcessor
                     // Forward (already confirmed) — fall through.
                 }
 
-                await PushFrameAsync(new TranscriptionFrame(t.Text, IsFinal: true, t.Language), ct).ConfigureAwait(false);
+                await PushFrameAsync(CreateTranscription(t.Text, isFinal: true, t.Language), ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }
