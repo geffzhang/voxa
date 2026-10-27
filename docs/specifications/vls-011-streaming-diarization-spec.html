@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VLS-011 — Streaming (online) speaker diarization</title>
+<style>
+:root {
+  --bg: #0f1419; --panel: #161b22; --panel2: #1c2330; --border: #2d3748;
+  --text: #d7dde6; --muted: #8b97a8; --accent: #4fc3f7; --accent2: #81d4fa;
+  --good: #66bb6a; --warn: #ffb74d; --code-bg: #11151c;
+  --mono: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 0 28px 120px; }
+header.doc { border-bottom: 1px solid var(--border); padding: 40px 0 24px; margin-bottom: 32px; }
+header.doc h1 { font-size: 1.9rem; margin: 0 0 6px; color: #fff; }
+header.doc .sub { color: var(--muted); font-size: 0.95rem; }
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 18px; }
+.meta-grid div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 0.85rem; }
+.meta-grid b { color: var(--accent2); display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+h2 { font-size: 1.45rem; color: #fff; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-top: 56px; }
+h2 .secno { color: var(--accent); margin-right: 10px; }
+h3 { font-size: 1.08rem; color: var(--accent2); margin-top: 32px; }
+p, li { font-size: 0.95rem; }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--panel2); padding: 1px 6px; border-radius: 4px; color: #a5d6ff; }
+pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; overflow-x: auto; font-size: 0.82rem; line-height: 1.5; }
+pre code { background: none; padding: 0; color: #c9d6e3; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.88rem; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: var(--panel2); color: #fff; font-weight: 600; }
+.callout { border-left: 4px solid var(--accent); background: var(--panel); border-radius: 0 8px 8px 0; padding: 12px 18px; margin: 18px 0; font-size: 0.9rem; }
+.callout.good { border-left-color: var(--good); }
+.callout.warn { border-left-color: var(--warn); }
+.callout b:first-child { color: var(--accent2); }
+ul.check { list-style: none; padding-left: 4px; }
+ul.check li::before { content: "☐ "; color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>VLS-011 — Streaming (online) speaker diarization</h1>
+  <div class="sub">
+    VLS-005 diarizes a finished recording: it collects the whole file, segments it, embeds each region, then
+    clusters. That is the right shape for a meeting upload and the wrong shape for a live call — it needs the
+    end of the audio to answer, re-runs the model over everything whenever the recording grows, and has no
+    vocabulary for "this label may still change". This spec adds the online counterpart: who spoke when, as the
+    audio arrives, with a stated lookahead, stable speaker numbers across the session, and a revision protocol
+    so the answer can improve without the consumer re-deriving history.
+  </div>
+  <div class="meta-grid">
+    <div><b>Document</b> VLS-011 v1.0</div>
+    <div><b>Date</b> 2026-10-28</div>
+    <div><b>Status</b> Implemented</div>
+    <div><b>Target</b> <code>Voxa.Audio.Diarization</code>, <code>.Onnx</code>, new <code>.Streaming</code>, <code>Voxa.Core</code>, <code>Voxa.Speech.Abstractions</code>, <code>Voxa.AspNetCore</code></div>
+    <div><b>Depends on</b> VLS-005 (seams), VLS-006 (ONNX host), VAD placement</div>
+    <div><b>Pairs with</b> VRT-004 (interim STT), VRT-006 (turn strategies)</div>
+  </div>
+</header>
+
+<div class="callout good">
+  <b>Scope.</b> Five decisions, each of which a streaming diarizer can get wrong in a way that only shows up in
+  production: keep the speaker-level mask, keep incremental audio state instead of the recording, keep session-wide
+  speaker state, say out loud whether a result may still change, and join the result to transcripts on one clock
+  without running the model on the data loop. Sections 2–6 are those five, in order.
+</div>
+
+<h2><span class="secno">1.</span> Problem</h2>
+
+<p>Three things break when a batch diarizer is pointed at a live stream.</p>
+
+<ul>
+  <li><b>It needs the future.</b> Clustering is global: a merge decided at minute 9 can relabel minute 1, and
+  nothing is final until the call ends. A live caption has to be publishable at minute 1.</li>
+  <li><b>It re-reads the past.</b> Every new chunk invalidates the previous answer, so the cost of minute <i>n</i>
+  is proportional to <i>n</i>, and memory grows with the call.</li>
+  <li><b>It answers a coarser question than the stream can ask.</b> Speech/silence regions are enough to cut a
+  meeting into turns; they are not enough for overlapping speech, for "who is this" across the call, or for
+  attaching a transcript to a person.</li>
+</ul>
+
+<p>The underlying cause is the same in all three: the batch pipeline reads the segmentation model's
+<b>powerset</b> output and immediately collapses it to <code>speech | silence</code>
+(<code>PowersetSegmentationDecoder.FrameActivity</code>). Everything a streaming system needs — which local
+speaker, how confident, whether two are talking at once — is in the powerset and is thrown away by that collapse.</p>
+
+<h2><span class="secno">2.</span> Keep the speaker-level mask</h2>
+
+<p>pyannote's segmentation head emits, per 10 ms frame, one logit per powerset class: silence, one class per
+speaker, one per speaker <i>pair</i> (3 speakers × up to 2 concurrent ⇒ 7 classes). The new decode is a softmax
+followed by a marginal onto the local speakers:</p>
+
+<pre><code>p[s] = Σ_c softmax(logits)[c] · mapping[c][s]        // mapping = BuildPowersetMapping(...)</code></pre>
+
+<p><code>PowersetSegmentationDecoder.FrameSpeakerProbabilities</code> (pure, no ONNX, unit-tested on synthetic
+logits) produces one probability per local speaker per frame. What that preserves:</p>
+
+<table>
+  <tr><th>Information</th><th>Speech/silence collapse</th><th>Speaker-level marginal</th></tr>
+  <tr><td>Which local speaker</td><td>lost — a hand-over becomes one region</td><td>one probability per speaker</td></tr>
+  <tr><td>Overlapping speech</td><td>lost — one region, one label</td><td>two non-zero entries ⇒ two people talking</td></tr>
+  <tr><td>Confidence</td><td>lost — binary</td><td>the value itself (onset/offset hysteresis reads it)</td></tr>
+  <tr><td>Voiceprint extraction</td><td>impossible — no span to embed per speaker</td><td>each speaker channel gives its own span</td></tr>
+</table>
+
+<p>The marginal deliberately does <b>not</b> sum to 1: a pair class contributes its whole probability to both of
+its members, because the channels are later read as independent tracks. Two channels open on one frame is the
+overlap signal.</p>
+
+<div class="callout">
+  <b>Local channels are not global speakers.</b> Channel 0 in one window is not channel 0 in the next — the
+  mapping is arbitrary per window. So frames can never be accumulated across windows by channel. What is stable
+  across windows is <i>a run of frames on one channel inside one window</i>: a <b>local turn</b>. The turn covers
+  a known audio span, that span is embedded once, and the embedding is what carries identity forward.
+</div>
+
+<h2><span class="secno">3.</span> Incremental audio state</h2>
+
+<h3>3.1 The buffer</h3>
+
+<p><code>AudioRingBuffer</code> is a fixed-capacity circular buffer addressed by <b>absolute sample index</b>. That
+addressing is the whole point: a segment, a window, and an embedding span are all expressed as indices from the
+session start, so dropping old audio changes what can be re-read — never what a timestamp means.</p>
+
+<pre><code>Write(samples)              // appends, evicting by capacity
+CopyTo(absoluteStart, dest) // zero-fills before Oldest / past End; returns the real sample count
+DiscardBefore(absoluteIndex)</code></pre>
+
+<h3>3.2 The window schedule</h3>
+
+<p>Windows run every <code>HopSamples</code> (default: 10% of the window). A window is trusted only for the slice
+in its centre — the part both it and its neighbours saw — so the diarizer owns exactly one hop per window:</p>
+
+<pre><code>ownedStart = windowStart + (window − hop) / 2
+ownedEnd   = ownedStart + hop</code></pre>
+
+<p>A turn whose end lands inside <code>ownedEnd</code> is <b>final</b>: no later window can move it. That is where
+the lookahead comes from, and it is exposed rather than hidden — <code>StreamingDiarizer.CommitFrontierSeconds</code>
+is the newest instant that is fully decided, and <code>SamplesSeen − frontier</code> is what the capability costs
+in latency. With the shipped pyannote geometry (5 s window, 0.5 s hop) that is 2.25 s.</p>
+
+<h3>3.3 Retention and eviction</h3>
+
+<p>Two readers need the buffer, and they reach back different distances: the window schedule needs
+<code>[nextWindowStart, nextWindowStart + window)</code>, and a turn's closing embedding needs that turn's whole
+span. Audio is dropped only when neither can use it:</p>
+
+<pre><code>DiscardBefore(min(nextWindowStart, SamplesSeen − MaxBufferedSeconds · SampleRate))</code></pre>
+
+<div class="callout warn">
+  <b>Evicting by window start is a correctness bug, not just a memory trade.</b> Dropping everything before the
+  next window leaves a long turn's closing read with only its tail — a 1.5 s turn described by its last 0.1 s, which
+  in an overlap is the <em>other</em> person's voice. The retention rule above is what keeps a turn's embedding
+  about the turn; with a 60 s default, a turn longer than that is the only case that is described by part of
+  itself.
+</div>
+
+<h3>3.4 Flush and gaps</h3>
+
+<p><code>Flush()</code> ends the stream: it continues the same window schedule to the end with a <b>zero-padded
+tail</b> (the batch decoder's last chunk, same idea), then commits every open turn. It never steps back over audio
+already processed — a flush window that re-ran decided audio would see a run whose left edge is no longer the audio
+it started at, and would mint a second segment for a finished turn.</p>
+
+<p><code>NotifyGap(droppedSamples)</code> is the honest answer to lost audio (the caller's queue overflowed). The
+timeline still advances — a timestamp keeps meaning what it meant — but the window schedule restarts after the hole
+and every open turn is closed, because whatever continued inside the lost audio cannot be recovered. A gap is a
+discontinuity, never silently stitched.</p>
+
+<h2><span class="secno">4.</span> Session-level speaker state</h2>
+
+<p><code>SpeakerPrototypes</code> holds one prototype per speaker: an L2-normalised centroid, a <b>weight</b> that
+freezes at <code>PrototypeWeightCap</code> seconds (bounded drift over a long call), and an uncapped
+<code>TotalEvidence</code> used only for merge eligibility.</p>
+
+<h3>4.1 Numbering</h3>
+
+<p>Ids are handed out in creation order and are never renumbered or reused. The only way an id disappears is a
+merge, and the survivor is always the <b>older</b> id — so a consumer's history keeps its meaning, and a stale id
+always maps forward through the merge notice.</p>
+
+<h3>4.2 Short turns and low confidence</h3>
+
+<p>A turn may <i>create</i> a speaker only with <code>MinNewSpeakerEvidence</code> seconds of speech <b>and</b>
+<code>MinTurnConfidence</code> mean track activity. Everything thinner is adopted, never invented:</p>
+
+<table>
+  <tr><th>Case</th><th>Result</th><th><code>Confidence</code></th></tr>
+  <tr><td>Creates a speaker</td><td>new id</td><td><code>1.0</code></td></tr>
+  <tr><td>Matches an existing speaker</td><td>that id</td><td><code>1 − distance</code></td></tr>
+  <tr><td>Ambiguous (matched, in the dead band) or speaker cap reached</td><td>nearest id</td><td><code>0.5·(1 − distance)</code></td></tr>
+  <tr><td>Too thin to describe, previous speaker within <code>ContinuityWindow</code></td><td>borrowed id</td><td><code>0.25</code></td></tr>
+  <tr><td>Too thin, nothing to borrow</td><td><code>UnknownSpeaker</code> (−1)</td><td><code>0</code></td></tr>
+</table>
+
+<p>The "speaker cap" row matters: hitting <code>MaxSpeakers</code> never renumbers anyone. A new voice attaches to
+the nearest prototype and says so through its confidence, which is a truthful answer; re-using an id would not be.</p>
+
+<h3>4.3 Enrolment is a closing read</h3>
+
+<p>A turn is described twice: once as soon as it carries enough audio (the provisional label — this is what
+low latency buys), and once when it ends, from the complete turn. Only the <b>closing</b> read moves a prototype
+(<code>enrol: true</code>). A provisional match returns an id but does not fold its embedding into the centroid —
+otherwise an overlap in progress teaches a settled speaker the other person's voice, and the error persists for the
+rest of the call.</p>
+
+<h3>4.4 Merges</h3>
+
+<p>Each window end, two prototypes closer than <code>MergeThreshold</code> are folded together — but only if the
+retiree's <code>TotalEvidence</code> is under <code>MergeEvidence</code>. A voice that has carried a long stretch of
+the conversation is never retired into a newcomer. Merges produced by a window re-publish the affected segments
+(same ids, higher revisions) within <code>RevisionWindow</code>; older history is left alone and reaches consumers
+through <code>SpeakerMergedFrame</code>.</p>
+
+<h2><span class="secno">5.</span> May a result change?</h2>
+
+<p>Yes — and the shape of the answer is the point.</p>
+
+<pre><code>SpeakerSegmentUpdate(string Id, int Speaker, double Start, double End, bool IsFinal, int Revision, double Confidence)</code></pre>
+
+<ul>
+  <li>An update is a <b>keyed upsert</b> on <code>Id</code>. <code>Revision</code> starts at 0 and only increases;
+  a consumer that sees a lower revision than it holds ignores it.</li>
+  <li><code>IsFinal</code> means the <b>geometry</b> is settled (the end will not move) — not that the label is
+  perfect. A consumer that wants stable captions can drop provisional segments and accept a
+  <code>(window − hop) / 2</code> delay.</li>
+  <li>Two revision sources, both bounded: an extended end while the turn grows, and a merge relabel inside
+  <code>RevisionWindow</code>. Nothing older than the window is rewritten.</li>
+</ul>
+
+<h3>5.1 The latency/accuracy contract, stated</h3>
+
+<table>
+  <tr><th>What a consumer may assume</th><th>Bound</th></tr>
+  <tr><td>Audio at <code>t</code> has a decided label</td><td><code>t ≤ CommittedFrontierSeconds = SamplesSeen/sr − (window − hop)/2/sr</code></td></tr>
+  <tr><td>A provisional label may still change</td><td>until the segment's <code>IsFinal</code> revision</td></tr>
+  <tr><td>A merge may rewrite history</td><td>only inside <code>RevisionWindow</code> (default 30 s); older via the merge notice</td></tr>
+  <tr><td>Speaker ids</td><td>stable; never reused; only a merge retires one, into a lower id</td></tr>
+</table>
+
+<div class="callout">
+  <b>Why not decide once, later?</b> Because the answer is needed now. The trade is made explicit twice: the early
+  read gives a provisional label at the cost of accuracy, and the closing read gives accuracy at the cost of one
+  extra embedding per turn. Both are published, in order, on the same id.
+</div>
+
+<h2><span class="secno">6.</span> Transcript alignment and the frame pipeline</h2>
+
+<h3>6.1 One clock</h3>
+
+<p>Streaming diarization owns the input clock, because it is the only stage that sees the continuous input (it sits
+<b>before</b> the VAD: diarization needs silence, the VAD gates it away). Every chunk it forwards carries its
+absolute start sample:</p>
+
+<pre><code>AudioRawFrame.StartSample        (long?, null = not stamped)
+   ↓  STT records the utterance's first/last stamped chunk
+TranscriptionFrame.StartTime/EndTime   (double?, absolute seconds)
+   ↓  interval join
+SpeakerSegmentFrame.Start/End          (absolute seconds)</code></pre>
+
+<p>No per-stream offset bookkeeping: a transcript and a segment are joined by overlap on one timeline. A chunk
+replayed by the VAD's pre-roll keeps its stamp, so the replay still points at the audio it came from.</p>
+
+<h3>6.2 Attributing text that crosses a speaker change</h3>
+
+<p><code>SpeakerTimeline</code> resolves a transcript span to a speaker by:</p>
+
+<ol>
+  <li><b>greatest total overlap</b>, summed <i>per speaker</i> — so one speaker whose turn is split across several
+  segments (a revision, a merged neighbour) is not penalised against a single competing segment;</li>
+  <li><b>ties go to the earlier-starting segment</b> — deterministic, and the documented answer for text that
+  genuinely covers two speakers;</li>
+  <li>nothing covers it yet — the diarizer commits behind the audio, so the span <b>borrows</b> the speaker whose
+  segment ends closest before it, if that is inside <code>ContinuityWindow</code>.</li>
+</ol>
+
+<p>The segment stream stays authoritative: a later revision carries the corrected label on the same clock, so any
+consumer can re-join history. An engine that already labels speakers (a diarizing STT) is left alone — an existing
+<code>SpeakerId</code> is never overwritten.</p>
+
+<h3>6.3 Never block the data loop</h3>
+
+<pre><code>data loop:  AudioRawFrame → stamp → PCM16 → float → TryWrite(queue)
+                                                        │ full ⇒ count as dropped (a gap, later)
+                worker:  ReadAllAsync → NotifyGap? → Push → SpeakerSegmentFrame / SpeakerMergedFrame</code></pre>
+
+<p>One worker task per session owns the diarizer (which is not thread-safe by design: one instance, one consumer).
+The data loop only enqueues — a slow model delays diarization, never the conversation. On <code>EndFrame</code> the
+queue is completed, the worker is waited for within <code>FlushTimeout</code>, any remaining drops are reported as a
+gap, and <code>Flush()</code> commits the tail.</p>
+
+<h2><span class="secno">7.</span> Surfaces</h2>
+
+<table>
+  <tr><th>Type</th><th>Package</th><th>Role</th></tr>
+  <tr><td><code>ISpeakerMaskSegmentation</code></td><td>Diarization</td><td>audio window → per-frame per-local-speaker probabilities</td></tr>
+  <tr><td><code>StreamingDiarizer</code></td><td>Diarization</td><td>push / gap / flush; the state machine above</td></tr>
+  <tr><td><code>StreamingDiarizerConfig</code></td><td>Diarization</td><td>window, hop, thresholds, caps, retention</td></tr>
+  <tr><td><code>StreamingDiarizerConfig</code> + <code>SpeakerPrototypes</code></td><td>Diarization</td><td>session speakers, merges</td></tr>
+  <tr><td><code>PyannoteOnnxMaskSegmentation</code></td><td>Diarization.Onnx</td><td>the model-backed seam (pyannote segmentation-3.0, geometry from ONNX metadata)</td></tr>
+  <tr><td><code>PowersetSegmentationDecoder.FrameSpeakerProbabilities</code></td><td>Diarization.Onnx</td><td>powerset → speaker marginal</td></tr>
+  <tr><td><code>SpeakerDiarizationProcessor</code></td><td>Diarization.Streaming</td><td>clock stamping + off-loop worker + frame output</td></tr>
+  <tr><td><code>SpeakerAttributionProcessor</code></td><td>Diarization.Streaming</td><td>fills <code>TranscriptionFrame.SpeakerId</code></td></tr>
+  <tr><td><code>SpeakerSegmentFrame</code>, <code>SpeakerMergedFrame</code></td><td>Core</td><td>the wire shape of the upsert stream</td></tr>
+</table>
+
+<h3>7.1 Configuration</h3>
+
+<pre><code>Voxa:Diarization:Engine = "Streaming"          // default "None"
+Voxa:Diarization:WindowMs, HopMs               // 0 = the model's own geometry / 10%
+Voxa:Diarization:MatchThreshold, NewSpeakerThreshold, MaxSpeakers
+Voxa:Diarization:AttributeTranscripts = true
+Voxa:Diarization:ContinuityWindowSeconds</code></pre>
+
+<p>The composer inserts the stage after AEC/enhancement and <b>before</b> the VAD, and only when the host has
+registered both model seams; otherwise it logs and skips. Attribution goes after the transcription filter.</p>
+
+<h2><span class="secno">8.</span> Verification</h2>
+
+<ul class="check">
+  <li>Mask decode: silence → all zeros; single speaker → mass on that speaker; a pair class → two non-zero entries;
+  width mismatch → <code>ArgumentException</code>; a reused destination is cleared. <code>Voxa.Audio.Diarization.Onnx.Tests</code>.</li>
+  <li>Diarizer (no model, no network — two tones as speakers A and B): stable ids across windows, overlap preserved,
+  result independent of chunking, buffer bounded on a 12 s stream, flush commits the tail, a gap keeps the absolute
+  timeline, a short turn borrows instead of inventing, a thin turn with no history is unknown, the speaker cap
+  attaches, determinism, revision monotonicity with a final last, geometry validation, rate mismatch rejected.
+  <code>Voxa.Audio.Diarization.Tests</code>.</li>
+  <li>Pipeline: stamps, published + committed segments, a stalled worker becoming a gap rather than backpressure,
+  rate mismatch forwarding the clock, pass-through. Attribution: greatest overlap, tie by start, borrow, merge
+  remap, never overwriting an existing id, bounded timeline. <code>Voxa.Audio.Diarization.Streaming.Tests</code>.</li>
+</ul>
+
+<h2><span class="secno">9.</span> Known limits</h2>
+
+<ul>
+  <li>A turn longer than <code>MaxBufferedSeconds</code> is described by what is retained — bounded memory, stated
+  rather than hidden.</li>
+  <li>Speaker <b>identification</b> (enrolment against known voices) is a different problem: ids here are
+  per-session clusters, not a directory.</li>
+  <li>Two speakers who only ever talk simultaneously cannot be separated by an embedding of the mix; the closing
+  read's span may not contain a dominant frame for either. The segment still carries both channels' turns, which is
+  what overlap detection needs.</li>
+  <li>Cross-session speaker memory is out of scope; the prototypes die with the diarizer.</li>
+</ul>
+
+</div>
+</body>
+</html>

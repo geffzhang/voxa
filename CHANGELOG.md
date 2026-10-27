@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Streaming (online) speaker diarization (VLS-011)** —
+  [spec](docs/specifications/vls-011-streaming-diarization-spec.html). VLS-005 diarizes a finished recording
+  (global clustering, re-reads the file, nothing final until the end); this adds the live counterpart.
+  `Voxa.Audio.Diarization` gains `ISpeakerMaskSegmentation` (per-frame, per-local-speaker probabilities — the
+  speaker-level decode that keeps hand-overs, overlapping speech and a per-channel span to embed, instead of
+  collapsing the powerset to speech/silence), `StreamingDiarizer` (fixed-capacity `AudioRingBuffer` addressed by
+  absolute sample index, a centre-of-window commit schedule with an explicit `(window − hop) / 2` lookahead via
+  `CommitFrontierSeconds`, `Flush` with a zero-padded tail, and `NotifyGap` for audio lost upstream) and
+  `SpeakerPrototypes` (stable never-reused ids, continuity borrowing for thin turns, `UnknownSpeaker` instead of
+  an invented id, merges only while a prototype is still a newcomer). Output is a keyed upsert stream:
+  `SpeakerSegmentUpdate(Id, Speaker, Start, End, IsFinal, Revision, Confidence)` — monotonic revisions, `IsFinal`
+  = geometry settled, merges rewriting history only inside `RevisionWindow`. `PowersetSegmentationDecoder` gains
+  `FrameSpeakerProbabilities` and `Voxa.Audio.Diarization.Onnx` gains `PyannoteOnnxMaskSegmentation`.
+  `Voxa.Audio.Diarization.Streaming` is new: `SpeakerDiarizationProcessor` owns the input clock
+  (`AudioRawFrame.StartSample`), mirrors audio into the diarizer through a bounded queue where a full queue
+  becomes a reported gap rather than backpressure, and publishes `SpeakerSegmentFrame`/`SpeakerMergedFrame`;
+  `SpeakerAttributionProcessor` fills `TranscriptionFrame.SpeakerId` by overlap join (greatest overlap, tie to the
+  earlier speaker, continuity borrowing). `TranscriptionFrame` gains `StartTime`/`EndTime`, stamped by the STT
+  processor from the audio clock. Opt in with `Voxa:Diarization:Engine = "Streaming"` — the composer inserts the
+  stages only when the host registers both model seams.
 - **Arke word timing:** optional `wordTiming` health capability and `POST /stt/words`
   return Whisper cross-attention DTW word intervals, confidence, audio duration and a path-free model/engine
   identity. Subword bounds are joined without allocating sentence duration across words;

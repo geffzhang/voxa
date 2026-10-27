@@ -286,6 +286,48 @@ smoke-test the pipeline offline. In **Voxa Studio**, Voxtral becomes the default
 GPU once a server is configured — otherwise whisper.cpp. vLLM is the only supported runtime today (no ONNX/CPU
 path yet); see the [package README](../src/Voxa.Speech.Voxtral/README.md) for all the knobs.
 
+## Streaming speaker diarization (VLS-011)
+
+If you want "who said this" on a live call — not on a finished recording — enable the streaming diarization
+stage. It needs two model seams registered by the host (`ISpeakerMaskSegmentation`, `ISpeakerEmbedding`); the
+composer inserts it **before the VAD** (diarization needs the silence the VAD gates away), stamps the input clock
+on every audio chunk, and — with `AttributeTranscripts` on — adds an attribution stage after STT that fills
+`TranscriptionFrame.SpeakerId`.
+
+```jsonc
+"Voxa": {
+  "Diarization": {
+    "Engine": "Streaming",
+    "WindowMs": 0,                    // 0 = the model's own window
+    "HopMs": 0,                       // 0 = 10% of the window
+    "MatchThreshold": 0.45,           // "this is a known speaker" cosine-distance ceiling
+    "NewSpeakerThreshold": 0.62,      // "this is somebody new" floor
+    "MaxSpeakers": 10,
+    "AttributeTranscripts": true,
+    "ContinuityWindowSeconds": 1.5    // a thin turn may borrow the previous speaker this long
+  }
+}
+```
+
+What to expect from a live pipeline:
+
+- **Labels arrive late by design**, by `(window − hop) / 2` (2.25 s with the reference geometry). A segment is
+  published *provisionally* as soon as it has enough audio, and again — final — once the window that owns its end
+  has run. Consumers key on `SpeakerSegmentFrame.SegmentId` and treat a higher `Revision` as a replacement.
+- **A transcript may be labelled before its segment exists.** Attribution borrows the speaker who was talking
+  immediately before the span; the segment stream then publishes the authoritative label on the same clock.
+- **Nothing blocks the conversation.** Model inference runs on one worker task behind a bounded queue; if it falls
+  behind, the dropped audio is reported as a timeline gap. If you see gaps in the logs, raise
+  `SpeakerDiarizationOptions.AudioQueueCapacity` rather than shortening the window.
+- **Ids are per session, never reused.** A merge (two prototypes proven to be one voice) retires the *younger* id
+  into the older one and is announced as `SpeakerMergedFrame`.
+- **Audio must already be 16 kHz mono.** A mismatch is logged once and the session continues undiarized —
+  resample upstream instead.
+
+The models are not bundled yet: until the WeSpeaker `ISpeakerEmbedding` ONNX implementation lands, the streaming
+stage stays off unless a host supplies both seams. See the
+[spec](specifications/vls-011-streaming-diarization-spec.html) for the full behaviour contract.
+
 ## Latency expectations — read this before filing a bug
 
 Cloud streaming STT shows interim transcripts while the user talks. **WhisperCpp does not**: it

@@ -23,6 +23,33 @@ emit `DiarizedSegment[]` with no I/O. That is what makes the clustering testable
 embeddings** in the default lane (two tight groups → two speakers, threshold sensitivity, speaker-count caps,
 determinism) with no model download, mirroring speech-core's runtime-free `DiarizationPipeline`.
 
+## Streaming / online diarization (VLS-011)
+
+The pipeline above is a **batch** diarizer: global clustering, re-reads the recording, nothing final until the
+audio ends. For a live call the same package ships the online counterpart — see
+[VLS-011](docs/specifications/vls-011-streaming-diarization-spec.html):
+
+- **`ISpeakerMaskSegmentation`** + **`SpeakerMaskWindow`** — the frame-level seam that keeps the speaker
+  information: one probability per *local* speaker per 10 ms frame, so a hand-over is two channels, an overlap is
+  two non-zero entries on one frame, and each channel gives a span worth embedding. (The older
+  `ISpeakerSegmentation` returns speech regions — the collapse this seam exists to avoid.)
+- **`StreamingDiarizer`** — `Push(audio)` / `NotifyGap(dropped)` / `Flush()`. Holds three kinds of state and
+  nothing else: a fixed-capacity `AudioRingBuffer` addressed by absolute sample index, the window schedule with
+  its commit frontier (`CommitFrontierSeconds` = the lookahead this capability pays), and the session's
+  `SpeakerPrototypes`.
+- **`StreamingDiarizerConfig`** — window/hop (default: the engine's, 10% hop), onset/offset hysteresis, evidence
+  floors, match/new-speaker thresholds, continuity window, speaker cap, merge bounds, revision window, retained
+  seconds.
+- **`SpeakerPrototypes`** — stable ids in creation order, never reused; a short or low-confidence turn *borrows*
+  the previous speaker (or answers `UnknownSpeaker`) instead of inventing one; only a closing read enrols a voice.
+- **`SpeakerSegmentUpdate`** — the upsert protocol: keyed by `Id`, `Revision` monotonic from 0, `IsFinal` = the
+  geometry is settled, `Confidence` = how much the *label* deserves trust.
+
+Frame-level plumbing (the clock stamp, the off-loop worker, the transcript join) lives in
+**`Voxa.Audio.Diarization.Streaming`**; the model-backed segmentation seam lives in
+**`Voxa.Audio.Diarization.Onnx`** (`PyannoteOnnxMaskSegmentation`). Like the batch pipeline, everything here is
+runtime-free and testable against two tones — no model, no download.
+
 ## Not yet here (needs real pinned models / a consumer)
 
 - The **reference ONNX implementations** (Pyannote segmentation + WeSpeaker embedding) live in a separate
@@ -30,5 +57,5 @@ determinism) with no model download, mirroring speech-core's runtime-free `Diari
   cleared licences) and built on the VLS-006 ONNX host.
 - The **`voxa transcribe --diarize`** CLI verb that writes `SpeakerId` onto the transcript — the natural first
   consumer, which only does something once the ONNX impls exist.
-- Real-time / streaming diarization and speaker **identification** (enrollment against known voices) are
-  out of scope (follow-ups once embeddings exist).
+- Speaker **identification** (enrollment against known voices) is out of scope for both pipelines (follow-ups once
+  embeddings exist). Streaming ids are per-session clusters, not a directory.

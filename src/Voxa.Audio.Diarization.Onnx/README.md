@@ -25,6 +25,22 @@ var segmentation = new PyannoteOnnxSegmentation(path, host);
 var pipeline = new DiarizationPipeline(segmentation, embedding); // embedding = WeSpeaker (follow-up)
 ```
 
+## `PyannoteOnnxMaskSegmentation` (`ISpeakerMaskSegmentation`)
+
+The streaming counterpart (VLS-011): the same model and the same windowing, but the seam keeps the **speaker-level
+mask** instead of collapsing to speech regions. Each window becomes one probability per *local* speaker per frame
+(`PowersetSegmentationDecoder.FrameSpeakerProbabilities` — softmax, then marginalise the powerset classes onto the
+speakers), which is what preserves hand-overs, overlapping speech and a per-channel span to embed.
+
+```csharp
+var segmentation = new PyannoteOnnxMaskSegmentation(path, host);
+var diarizer = new StreamingDiarizer(segmentation, embedding); // embedding = WeSpeaker (follow-up)
+```
+
+`MaxLocalSpeakers`, `FrameShiftSamples` and `FrameOffsetSamples` come from the model, so the diarizer's window
+geometry is resolved against the engine rather than hard-coded. A model exported with a fixed-length input exposes
+that length as `WindowSamples` and cannot be shortened.
+
 ## Pinned model
 
 `PyannoteSegmentationCatalog.Model` pins the **sherpa-onnx export** of pyannote-3.0 — an **ungated, plain
@@ -34,6 +50,7 @@ resolves through `VoxaModelCache` with no archive step or HF token. SHA-256 sour
 ## Status / follow-ups
 
 - **Shipped:** the segmentation engine + the pinned model + the pure decoder (unit-tested) + a `LocalModels`
-  smoke test that runs the real model end-to-end.
+  smoke test that runs the real model end-to-end; the streaming **mask** engine (VLS-011) over the same host and
+  model, with the speaker-marginal decoder unit-tested.
 - **Follow-ups:** the `ISpeakerEmbedding` ONNX impl (**WeSpeaker**, CC-BY-4.0 — needs an Fbank front-end) to
-  complete the full diarization stack, and the `voxa transcribe --diarize` CLI consumer.
+  complete the full diarization stack (batch *and* streaming), and the `voxa transcribe --diarize` CLI consumer.
